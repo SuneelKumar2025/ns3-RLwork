@@ -160,7 +160,19 @@ void ScheduleNextStateRead(double envStepTime, Ptr<OpenGymInterface> openGym)
   Simulator::Schedule (Seconds(envStepTime), &ScheduleNextStateRead, envStepTime, openGym);
   openGym->NotifyCurrentState();
 }
+double ccaBusyTimeUs = 0;
 
+void
+PhyStateTrace(std::string context,
+              Time start,
+              Time duration,
+              WifiPhyState state)
+{
+    if (state == WifiPhyState::CCA_BUSY)
+    {
+        ccaBusyTimeUs += duration.GetMicroSeconds();
+    }
+}
 
 //check if we need each espisode random
 int
@@ -420,6 +432,10 @@ for (int slot = 0; slot < 4; slot++)
   // phy1.EnablePcap ("OpenGym-Phy1-STA", staDevices);
   // phy2.EnablePcap ("OpenGym-Phy2-STA", staDevices);
   // OpenGym Env
+
+  Config::Connect(
+  "/NodeList/0/DeviceList/0/$ns3::WifiNetDevice/Phy/State/State",
+  MakeCallback(&PhyStateTrace));
   Ptr<OpenGymInterface> openGym = CreateObject<OpenGymInterface> (openGymPort);
   openGym->SetGetActionSpaceCb( MakeCallback (&MyGetActionSpace) );
   openGym->SetGetObservationSpaceCb( MakeCallback (&MyGetObservationSpace) );
