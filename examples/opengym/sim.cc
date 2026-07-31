@@ -40,16 +40,17 @@
 
 
 using namespace ns3;
-  double simulationTime = 40; //seconds
+ 
 NS_LOG_COMPONENT_DEFINE ("OpenGym");
 
-
+ double simulationTime = 10; //seconds
+float slaBound=170.0;
 /* * Callback: Tells Python what the network state "looks like".
  * Here: A vector of 5 values (0.0 to 10.0).
  */
 Ptr<OpenGymSpace> MyGetObservationSpace(void)
 {
-  uint32_t nodeNum = 4;
+  uint32_t nodeNum = 3;
   float low = 0.0;
   float high = 1000000.0; // Increase this to accommodate your large numbers
   std::vector<uint32_t> shape = {nodeNum,};
@@ -88,43 +89,84 @@ bool MyGetGameOver(void)
  */
 Ptr<OpenGymDataContainer> MyGetObservation(void)
 {
-  uint32_t nodeNum = 4;
+  uint32_t nodeNum = 3;
   std::vector<uint32_t> shape = {nodeNum,};
-  // Ptr<OpenGymBoxContainer<uint32_t>> box = CreateObject<OpenGymBoxContainer<uint32_t>>(shape);
-
-
-
   Ptr<OpenGymBoxContainer<float>> box = CreateObject<OpenGymBoxContainer<float>>(shape);
-// box->AddValue((float)HtFrameExchangeManager::m_rlState.timestamp);
-box->AddValue((float)HtFrameExchangeManager::m_rlState.l1_delay);
-box->AddValue((float)HtFrameExchangeManager::m_rlState.l2_delay);
-box->AddValue((float)HtFrameExchangeManager::m_rlState.packetSize);
+  box->AddValue((float)HtFrameExchangeManager::m_rlState.l1_delay/slaBound);
+  box->AddValue((float)HtFrameExchangeManager::m_rlState.l2_delay/slaBound);
   box->AddValue((float)HtFrameExchangeManager::m_rlState.linkId);
+
+  //  std::cout<<"link 1:   "<<HtFrameExchangeManager::m_rlState.l1_delay<<"link 2:     "<<HtFrameExchangeManager::m_rlState.l2_delay<<"\n";
 //  NS_LOG_UNCOND (HtFrameExchangeManager::m_rlState.l1_delay<<", "<<HtFrameExchangeManager::m_rlState.l2_delay<<", "<<HtFrameExchangeManager::m_rlState.delay);
   return box;
 }
-/* * Callback: Actually generates the network data for Python.
- * Here: Generates 5 random integers to simulate network metrics.
- */
-// FIX - return a meaningful per-step reward
-float MyGetReward(void) {
-  // // We use the delay of the link currently being used
-  // float currentDelay = HtFrameExchangeManager::m_rlState.delay;
-  
-  // // Return the negative delay so the agent tries to get as close to 0 as possible
-  // // You can scale it so the numbers aren't too large for the Neural Network
-  // return - (currentDelay / 100.0); 
-  float currentDelay = HtFrameExchangeManager::m_rlState.delay;
 
-  // Override reward: heavy penalty if above threshold, bonus if below
-if (currentDelay > 170)
-    return  -5   ;                    
-else
-    return 5   ;                     
-}
+// float MyGetReward(void) {
+
+//   float currentDelay = HtFrameExchangeManager::m_rlState.delay;
+
+//   // Override reward: heavy penalty if above threshold, bonus if below
+// if (currentDelay > slaBound)
+//     return  -5   ;                    
+// else
+//     return 5   ;                     
+// }
 /*
 Define extra info. Optional
 */
+
+float MyGetReward(void)
+{
+    float active_delay   = HtFrameExchangeManager::m_rlState.delay;
+    float l1             = HtFrameExchangeManager::m_rlState.l1_delay;
+    float l2             = HtFrameExchangeManager::m_rlState.l2_delay;
+
+      
+    int   active_link    = HtFrameExchangeManager::m_rlState.linkId;
+    float sla            = 170.0f;
+    float deadband       = 20.0f;
+
+    float inactive_delay = (active_link == 0) ? l2 : l1;
+
+    double now_us          = Simulator::Now().GetMicroSeconds();
+    double stale_thresh_us = 2.0 * 1000000.0;
+    double l1_age = now_us -        HtFrameExchangeManager::m_rlState.l1_last_update_us;
+    double l2_age = now_us -        HtFrameExchangeManager::m_rlState.l2_last_update_us;
+
+    bool inactive_stale = (active_link == 0)
+        ? (l2_age > stale_thresh_us)
+        : (l1_age > stale_thresh_us);
+   
+
+    // CASE 1: active link under SLA — job done
+    if (active_delay < sla)
+        return +5.0f;
+
+    // CASE 2: both links equally congested within deadband
+    // no correct answer, agent cannot improve by switching
+    if (std::abs(active_delay - inactive_delay) <= deadband)
+        return 0.0f;
+
+    // CASE 3: active is more congested than inactive
+    // clearly better link exists, must switch
+    if (active_delay > inactive_delay + deadband)
+        return -5.0f;
+
+    // CASE 4: active is less congested than inactive
+    // active > SLA but active < inactive — two sub-cases:
+    //
+    // 4A — inactive reading is FRESH:
+    //   both links genuinely congested, agent on better one
+    //   nothing can be done → 0
+    //
+    // 4B — inactive reading is STALE:
+    //   we only reach here if cases 1,2,3 all failed
+    //   AND inactive is fresh check failed
+    //   meaning: by elimination this IS the stale case
+    //   inactive frozen high from past congestion, may be clear now
+    //   → -2 to create probe pressure without panic
+    return inactive_stale ? -2.0f : 0.0f;
+}
 std::string MyGetExtraInfo(void)
 {
   // Convert the current active delay to a string so Python can read it
@@ -160,34 +202,76 @@ void ScheduleNextStateRead(double envStepTime, Ptr<OpenGymInterface> openGym)
   Simulator::Schedule (Seconds(envStepTime), &ScheduleNextStateRead, envStepTime, openGym);
   openGym->NotifyCurrentState();
 }
-double ccaBusyTimeUs = 0;
+// double ccaBusyTimeUs = 0;
 
-void
-PhyStateTrace(std::string context,
-              Time start,
-              Time duration,
-              WifiPhyState state)
+// void
+// PhyStateTrace(std::string context,
+//               Time start,
+//               Time duration,
+//               WifiPhyState state)
+// {
+//     if (state == WifiPhyState::CCA_BUSY)
+//     {
+//         ccaBusyTimeUs += duration.GetMicroSeconds();
+//     }
+// }
+
+double busy0Us = 0;
+double busy1Us = 0;
+
+void PhyStateTrace0(Time start,
+                    Time duration,
+                    WifiPhyState state)
 {
     if (state == WifiPhyState::CCA_BUSY)
     {
-        ccaBusyTimeUs += duration.GetMicroSeconds();
+        busy0Us += duration.GetMicroSeconds();
     }
 }
 
-//check if we need each espisode random
+void
+PhyStateTrace1(Time start,Time duration, WifiPhyState state)
+{
+     if (state == WifiPhyState::CCA_BUSY )
+    {
+        busy1Us += duration.GetMicroSeconds();
+    }
+  
+    // std::cout << "Link1 CCA busy = "          << busy1Us << " s\n";
+}
+
+void PrintChannelUtilization()
+{
+    double util0 = busy0Us / 1e6 * 100.0;
+    double util1 = busy1Us / 1e6 * 100.0;
+
+    std::cout << Simulator::Now().GetSeconds()
+              << " s : "
+              << "Link0 Util = " << util0 << "%, "
+              << "Link1 Util = " << util1 << "%"
+              << std::endl;
+
+    // reset counters for next 1-second window
+    busy0Us = 0;
+    busy1Us = 0;
+
+    Simulator::Schedule(Seconds(1.0), &PrintChannelUtilization);
+}
+
+
 int
 main (int argc, char *argv[])
 {
   // Parameters of the scenario
   
   uint32_t simSeed = 1;
-  // double simulationTime = 20; //seconds
-  double envStepTime = .1; //seconds, ns3gym env step time interval
+
+  double envStepTime = .01; //seconds, ns3gym env step time interval
   uint32_t openGymPort = 5555;
   uint32_t testArg = 0;
 
   //new parameters
-  double distance{1}; //1meters
+  double distance{10}; //1meters
   int gi = 800;
 
   std::size_t nStations{3}; //23
@@ -225,7 +309,7 @@ main (int argc, char *argv[])
   Config::SetDefault ("ns3::LogDistancePropagationLossModel::ReferenceLoss", DoubleValue (40));
 
   std::ostringstream oss1, oss2;
-  uint32_t mcs1 = 10; //1pe 24.613 RX 1510510 pe 27.99
+  uint32_t mcs1 = 5; //1pe 24.613 RX 1510510 pe 27.99
   oss1 << "HeMcs" << mcs1;
   
 
@@ -246,7 +330,7 @@ main (int argc, char *argv[])
   mac.SetType ("ns3::StaWifiMac", "Ssid", SsidValue (ssid));
 
   phy1.Set ("ChannelSettings", StringValue ("{0 ,160, BAND_6GHZ, 0}")); //phy1 15,160
-  phy2.Set ("ChannelSettings", StringValue ("{0, 160, BAND_6GHZ, 0}")); //phy2 47,160
+  phy2.Set ("ChannelSettings", StringValue ("{0, 20, BAND_5GHZ, 0}")); //phy2 47,160
 
   staDevices = wifi1.Install (phy1, phy2, mac, wifiStaNodes);
 
@@ -267,6 +351,8 @@ main (int argc, char *argv[])
                SsidValue (ssid));
   std::cout << "Scratch:: AP Wifidevice installation\n";
   apDevice = wifi1.Install (phy1, phy2, mac, wifiApNode);
+
+
   //Disable A-MPDU
   dev = wifiApNode.Get (0)->GetDevice (0);
   wifi_dev = DynamicCast<WifiNetDevice> (dev);
@@ -324,118 +410,269 @@ HtFrameExchangeManager::m_rlState.packetSize = 0;
 HtFrameExchangeManager::m_rlState.timestamp = 0;
   
  
- for (int i=0;i<=0;i++)
-{    
-    port++;
-    ApplicationContainer serverApp;
+//  for (int i=0;i<=0;i++)
+// {    
+//     port++;
+//     ApplicationContainer serverApp;
 
-    UdpServerHelper server (port);
-    serverApp = server.Install (wifiApNode.Get (0));
-    serverApp.Start (Seconds (0.0));
-    serverApp.Stop (Seconds (simulationTime));
+//     UdpServerHelper server (port);
+//     serverApp = server.Install (wifiApNode.Get (0));
+//     serverApp.Start (Seconds (0.0));
+//     serverApp.Stop (Seconds (simulationTime));
 
-    UdpClientHelper client (apNodeInterface.GetAddress (0), port);
-    client.SetAttribute ("MaxPackets", UintegerValue (4294967295u));
-    client.SetAttribute ("Interval", TimeValue (Time ("0.001"))); //packets/s 0.000225//0.00112
-    client.SetAttribute ("PacketSize", UintegerValue (1500));
-    ApplicationContainer clientApp = client.Install (wifiStaNodes.Get (i));
+//     UdpClientHelper client (apNodeInterface.GetAddress (0), port);
+//     client.SetAttribute ("MaxPackets", UintegerValue (4294967295u));
+//     client.SetAttribute ("Interval", TimeValue (Time ("0.0010"))); //packets/s 0.000225//0.00112
+//     client.SetAttribute ("PacketSize", UintegerValue (64));
+//     ApplicationContainer clientApp = client.Install (wifiStaNodes.Get (i));
 
-     clientApp.Start (Seconds (.1));
-    clientApp.Stop (Seconds (simulationTime));
+//      clientApp.Start (Seconds (.1));
+//     clientApp.Stop (Seconds (simulationTime));
   
-}
+// }
 
 
-// Generate random schedule for STA1 (i=1) and STA2 (i=2)
-// Using simSeed so each run gives different order
-Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
-// rng->SetAttribute("Seed", UintegerValue(simSeed));
+// // Generate random schedule for STA1 (i=1) and STA2 (i=2)
+// // Using simSeed so each run gives different order
+// Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
+// rng->SetStream(10); // Assign a fixed unique stream ID (e.g., 10) for this specific variable
+// // Decide who goes first: if rng > 0.5, STA1 first, else STA2 first
+// float slot= rng->GetValue(0.0, 1.0);
 
-// Decide who goes first: if rng > 0.5, STA1 first, else STA2 first
-bool sta1First = (rng->GetValue(0.0, 1.0) > 0.5);
+// if(slot<=0.30)
 
-// Slots: [0-5], [5-10], [10-15], [15-20]
-// STA1 gets slots 0,2 (even) and STA2 gets slots 1,3 (odd) — or vice versa
-for (int slot = 0; slot < 4; slot++)
+// {
+    
+
+//     port++;
+//     ApplicationContainer serverApp;
+//     int staindex = slot<=.15?1:2;
+
+//     UdpServerHelper server (port);
+//     serverApp = server.Install (wifiApNode.Get (0));
+//     serverApp.Start (Seconds (0.0));
+//     serverApp.Stop (Seconds (simulationTime));
+
+//     UdpClientHelper client (apNodeInterface.GetAddress (0), port);
+//     client.SetAttribute ("MaxPackets", UintegerValue (4294967295u));
+//     client.SetAttribute ("Interval", TimeValue (Time ("0.001"))); //packets/s 0.000225//0.00112
+//     client.SetAttribute ("PacketSize", UintegerValue (1500));
+//     ApplicationContainer clientApp = client.Install (wifiStaNodes.Get (staindex));
+
+//      clientApp.Start (Seconds (.1));
+//     clientApp.Stop (Seconds (simulationTime));
+//     // NS_LOG_UNCOND("Scenario: single congested"<<slot);
+
+// }
+// else if(slot<=.60)
+// {
+   
+//   for (int i=1;i<=2;i++)
+//   {    
+//       port++;
+//       ApplicationContainer serverApp;
+
+//       UdpServerHelper server (port);
+//       serverApp = server.Install (wifiApNode.Get (0));
+//       serverApp.Start (Seconds (0.0));
+//       serverApp.Stop (Seconds (simulationTime));
+
+//       UdpClientHelper client (apNodeInterface.GetAddress (0), port);
+//       client.SetAttribute ("MaxPackets", UintegerValue (4294967295u));
+//       client.SetAttribute ("Interval", TimeValue (Time ("0.001"))); //packets/s 0.000225//0.00112
+//       client.SetAttribute ("PacketSize", UintegerValue (1500));
+//       ApplicationContainer clientApp = client.Install (wifiStaNodes.Get (i));
+
+//       clientApp.Start (Seconds (.1));
+//       clientApp.Stop (Seconds (simulationTime));
+    
+//   }
+//     // NS_LOG_UNCOND("Equally single congested");
+
+// }
+// else if(slot<=.90)
+// {
+//     int index = slot<=.75?1:2;
+
+//   for (int i=1;i<=2;i++)
+//   {   
+//       port++;
+//       ApplicationContainer serverApp;
+
+//       UdpServerHelper server (port);
+//       serverApp = server.Install (wifiApNode.Get (0));
+//       serverApp.Start (Seconds (0.0));
+//       serverApp.Stop (Seconds (simulationTime));
+
+//       UdpClientHelper client (apNodeInterface.GetAddress (0), port);
+//       client.SetAttribute ("MaxPackets", UintegerValue (4294967295u));
+//       client.SetAttribute ("Interval", TimeValue (Time ("0.001"))); //packets/s 0.000225//0.001127
+//       if (index ==i)
+//       client.SetAttribute ("PacketSize", UintegerValue (100));
+//       else
+//       client.SetAttribute ("PacketSize", UintegerValue (1500));
+//       ApplicationContainer clientApp = client.Install (wifiStaNodes.Get (i));
+
+//       clientApp.Start (Seconds (.1));
+//       clientApp.Stop (Seconds (simulationTime));
+    
+//   }
+//     // NS_LOG_UNCOND("Both congested but one less than other"<<index);
+
+// }
+
+
+
+
+
+
+
+// // Slots: [0-5], [5-10], [10-15], [15-20]
+// // STA1 gets slots 0,2 (even) and STA2 gets slots 1,3 (odd) — or vice versa
+// bool sta1First=true;
+// for (int slot = 0; slot < 4; slot++)
+// {
+//     double startTime = slot * 5.0;
+//     double stopTime  = startTime + 5.0;
+
+//     // Who sends in this slot?
+//     bool sta1Active;
+//     if (sta1First) {
+//         sta1Active = (slot % 2 == 0); // STA1 in even slots
+//     } else {
+//         sta1Active = (slot % 2 == 1); // STA1 in odd slots
+//     }
+
+//     int activeIdx   = sta1Active ? 1 : 2;
+//     int inactiveIdx = sta1Active ? 2 : 1;
+
+//     port++;
+//     UdpServerHelper server(port);
+//     ApplicationContainer serverApp = server.Install(wifiApNode.Get(0));
+//     serverApp.Start(Seconds(startTime));
+//     serverApp.Stop(Seconds(stopTime));
+
+//     UdpClientHelper client(apNodeInterface.GetAddress(0), port);
+//     client.SetAttribute("MaxPackets", UintegerValue(4294967295u));
+//     client.SetAttribute("Interval", TimeValue(Time("0.001")));
+//     client.SetAttribute("PacketSize", UintegerValue(1500));
+
+//     ApplicationContainer clientApp = client.Install(wifiStaNodes.Get(activeIdx));
+//     clientApp.Start(Seconds(startTime + 0.1));
+//     clientApp.Stop(Seconds(stopTime));
+
+//     // NS_LOG_UNCOND("Slot " << slot << " [" << startTime << "-" << stopTime 
+//     //               << "]: STA" << activeIdx << " active, STA" << inactiveIdx << " silent");
+// }
+
+Ptr<UniformRandomVariable> rand = CreateObject<UniformRandomVariable>();
+
+// Pick two random cases for this episode
+int case1 = rand->GetInteger(1, 4);
+int case2 = rand->GetInteger(1, 4);
+
+std::vector<int> episodeCases = {case1, case2};
+
+for (int slot = 0; slot < 2; slot++)
 {
-    double startTime = slot * 10.0;
-    double stopTime  = startTime + 10.0;
+    double startTime = slot * 5.0;
+    double stopTime  = startTime + 5.0;
 
-    // Who sends in this slot?
-    bool sta1Active;
-    if (sta1First) {
-        sta1Active = (slot % 2 == 0); // STA1 in even slots
-    } else {
-        sta1Active = (slot % 2 == 1); // STA1 in odd slots
+    int scenario = episodeCases[slot];
+
+    uint32_t pktSizeSta1 = 0;
+    uint32_t pktSizeSta2 = 0;
+    bool sta1Active = false;
+    bool sta2Active = false;
+  scenario=4;
+    switch (scenario)
+    {
+        case 1:
+            // STA1 congested, STA2 silent
+            sta1Active = true;
+            pktSizeSta1 = 1500;
+            break;
+
+        case 2:
+            // STA2 congested, STA1 silent
+            sta2Active = true;
+            pktSizeSta2 = 1500;
+            break;
+
+        case 3:
+            // STA1 less congested than STA2
+            sta1Active = true;
+            sta2Active = true;
+            pktSizeSta1 = 100;
+            pktSizeSta2 = 1500;
+            break;
+
+        case 4:
+            // STA2 less congested than STA1
+            sta1Active = true;
+            sta2Active = true;
+            pktSizeSta1 = 1500;
+            pktSizeSta2 = 64;
+            break;
     }
 
-    int activeIdx   = sta1Active ? 1 : 2;
-    int inactiveIdx = sta1Active ? 2 : 1;
+    // ---------- STA1 ----------
+    if (sta1Active)
+    {
+        port++;
 
-    port++;
-    UdpServerHelper server(port);
-    ApplicationContainer serverApp = server.Install(wifiApNode.Get(0));
-    serverApp.Start(Seconds(startTime));
-    serverApp.Stop(Seconds(stopTime));
+        UdpServerHelper server1(port);
+        auto serverApp1 = server1.Install(wifiApNode.Get(0));
+        serverApp1.Start(Seconds(startTime));
+        serverApp1.Stop(Seconds(stopTime));
 
-    UdpClientHelper client(apNodeInterface.GetAddress(0), port);
-    client.SetAttribute("MaxPackets", UintegerValue(4294967295u));
-    client.SetAttribute("Interval", TimeValue(Time("0.001")));
-    client.SetAttribute("PacketSize", UintegerValue(1500));
+        UdpClientHelper client1(apNodeInterface.GetAddress(0), port);
+        client1.SetAttribute("MaxPackets", UintegerValue(4294967295u));
+        client1.SetAttribute("Interval", TimeValue(Time("0.001")));
+        client1.SetAttribute("PacketSize", UintegerValue(pktSizeSta1));
 
-    ApplicationContainer clientApp = client.Install(wifiStaNodes.Get(activeIdx));
-    clientApp.Start(Seconds(startTime + 0.1));
-    clientApp.Stop(Seconds(stopTime));
+        auto clientApp1 = client1.Install(wifiStaNodes.Get(1));
+        clientApp1.Start(Seconds(startTime + 0.1));
+        clientApp1.Stop(Seconds(stopTime));
+    }
 
-    // NS_LOG_UNCOND("Slot " << slot << " [" << startTime << "-" << stopTime 
-    //               << "]: STA" << activeIdx << " active, STA" << inactiveIdx << " silent");
+    // ---------- STA2 ----------
+    if (sta2Active)
+    {
+        port++;
+
+        UdpServerHelper server2(port);
+        auto serverApp2 = server2.Install(wifiApNode.Get(0));
+        serverApp2.Start(Seconds(startTime));
+        serverApp2.Stop(Seconds(stopTime));
+
+        UdpClientHelper client2(apNodeInterface.GetAddress(0), port);
+        client2.SetAttribute("MaxPackets", UintegerValue(4294967295u));
+        client2.SetAttribute("Interval", TimeValue(Time("0.0001")));
+        client2.SetAttribute("PacketSize", UintegerValue(pktSizeSta2));
+
+        auto clientApp2 = client2.Install(wifiStaNodes.Get(2));
+        clientApp2.Start(Seconds(startTime + 0.1));
+        clientApp2.Stop(Seconds(stopTime));
+    }
+
+    NS_LOG_UNCOND("Slot " << slot
+                    << " Case=" << scenario
+                    << " [" << startTime << "-" << stopTime << "]");
 }
 
-// // =====================================================================
-// // NEW SLOT 4 (20.0s to 25.0s): BOTH LINKS CONGESTED SIMULTANEOUSLY
-// // =====================================================================
-// double finalStart = 10.0;
-// double finalStop  = 15.0;
 
-// // 1. Activate STA1 for the final slot
-// port++;
-// UdpServerHelper serverSta1(port);
-// ApplicationContainer serverApp1 = serverSta1.Install(wifiApNode.Get(0));
-// serverApp1.Start(Seconds(finalStart));
-// serverApp1.Stop(Seconds(finalStop));
+Config::ConnectWithoutContext(
+"/NodeList/0/DeviceList/0/$ns3::WifiNetDevice/Phys/0/State/State",
+MakeCallback(&PhyStateTrace0));
 
-// UdpClientHelper clientSta1(apNodeInterface.GetAddress(0), port);
-// clientSta1.SetAttribute("MaxPackets", UintegerValue(4294967295u));
-// clientSta1.SetAttribute("Interval", TimeValue(Time("0.001"))); 
-// clientSta1.SetAttribute("PacketSize", UintegerValue(1500));
+Config::ConnectWithoutContext(
+"/NodeList/0/DeviceList/0/$ns3::WifiNetDevice/Phys/1/State/State",
+MakeCallback(&PhyStateTrace1));
 
-// ApplicationContainer clientApp1 = clientSta1.Install(wifiStaNodes.Get(1));
-// clientApp1.Start(Seconds(finalStart + 0.1));
-// clientApp1.Stop(Seconds(finalStop));
 
-// // 2. Activate STA2 for the exact same slot (forces heavy collision/contention)
-// port++;
-// UdpServerHelper serverSta2(port);
-// ApplicationContainer serverApp2 = serverSta2.Install(wifiApNode.Get(0));
-// serverApp2.Start(Seconds(finalStart));
-// serverApp2.Stop(Seconds(finalStop));
 
-// UdpClientHelper clientSta2(apNodeInterface.GetAddress(0), port);
-// clientSta2.SetAttribute("MaxPackets", UintegerValue(4294967295u));
-// clientSta2.SetAttribute("Interval", TimeValue(Time("0.001"))); 
-// clientSta2.SetAttribute("PacketSize", UintegerValue(1500));
 
-// ApplicationContainer clientApp2 = clientSta2.Install(wifiStaNodes.Get(2));
-// clientApp2.Start(Seconds(finalStart + 0.1));
-// clientApp2.Stop(Seconds(finalStop));
-
-  // phy1.EnablePcap ("OpenGym-Phy1-STA", staDevices);
-  // phy2.EnablePcap ("OpenGym-Phy2-STA", staDevices);
-  // OpenGym Env
-
-  Config::Connect(
-  "/NodeList/0/DeviceList/0/$ns3::WifiNetDevice/Phy/State/State",
-  MakeCallback(&PhyStateTrace));
   Ptr<OpenGymInterface> openGym = CreateObject<OpenGymInterface> (openGymPort);
   openGym->SetGetActionSpaceCb( MakeCallback (&MyGetActionSpace) );
   openGym->SetGetObservationSpaceCb( MakeCallback (&MyGetObservationSpace) );
@@ -446,7 +683,7 @@ for (int slot = 0; slot < 4; slot++)
   openGym->SetExecuteActionsCb( MakeCallback (&MyExecuteActions) );
   Simulator::Schedule (Seconds(0), &ScheduleNextStateRead, envStepTime, openGym);
 
-
+Simulator::Schedule(Seconds(1.0), &PrintChannelUtilization);
   // NS_LOG_UNCOND ("Simulation start");
   Simulator::Stop (Seconds (simulationTime));
   Simulator::Run ();

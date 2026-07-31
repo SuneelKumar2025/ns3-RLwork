@@ -1,10 +1,10 @@
-# #!/usr/bin/env python3
-# # -*- coding: utf-8 -*-
+# !/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 
 
-# #!/usr/bin/env python3
-# # -*- coding: utf-8 -*-
+# !/usr/bin/env python3
+# -*- coding: utf-8 -*-
  
 # import numpy as np
 # import tensorflow as tf
@@ -58,7 +58,7 @@
  
 # # --- Hyperparameters ---
 # total_episodes = 200
-# max_env_steps  = 151
+# max_env_steps  = 1000
 # gamma          = 0.95
 # epsilon        = 1.0
 # epsilon_min    = 0.01
@@ -219,6 +219,122 @@
 
 
 
+# import numpy as np
+# import tensorflow as tf
+# from tensorflow import keras
+# from ns3gym import ns3env
+# import matplotlib.pyplot as plt
+# import matplotlib as mpl
+
+# tf.get_logger().setLevel('ERROR')
+
+# # Connect to ns-3 simulation
+# env = ns3env.Ns3Env()
+# env.reset()
+
+# ob_space = env.observation_space
+# ac_space = env.action_space
+# print("Observation space:", ob_space, ob_space.dtype)
+# print("Action space:", ac_space, ac_space.dtype)
+
+# s_size = ob_space.shape[0]
+# a_size = ac_space.n
+# print("s_size =", s_size)
+# print("a_size =", a_size)
+
+# delay_history = []
+# step_times = []
+# l1_delay_history = []
+# l2_delay_history = []
+# action_history = []
+
+# step_counter = 0
+
+# total_episodes = 1
+# max_env_steps  = 5000
+
+# # --- Load trained model ---
+# model = tf.keras.models.load_model("/home/suneel/Videos/ns-allinone-3.36.1/ns-3.36.1/contrib/opengym/examples/opengym/wifi_mlo_model.keras")
+# print("Model loaded successfully!")
+
+# # --- Inference loop ---
+# for e in range(total_episodes):
+#     state = env.reset()
+#     state = np.reshape(state, [1, s_size])
+
+#     for time in range(max_env_steps):
+#         action = np.argmax(model.predict(state, verbose=0)[0])
+
+#         next_state, reward, done, info = env.step(action)
+
+#         l1_delay = float(next_state[0])
+#         l2_delay = float(next_state[1])
+#         action_history.append(action)
+
+
+#         current_delay = float(info)
+#         delay_history.append(current_delay)
+#         l1_delay_history.append(l1_delay)
+#         l2_delay_history.append(l2_delay)
+#         step_times.append(step_counter * 0.1)
+#         step_counter += 1
+
+#         # print(f"t={step_counter*0.1:.1f}s | Action: {action} | Delay: {current_delay:.2f} us")
+
+#         if done:
+#             break
+
+#         state = np.reshape(next_state, [1, s_size])
+
+# env.close()
+# print("Inference complete.")
+
+# # --- Plot ---
+# mpl.rcdefaults()
+# mpl.rcParams.update({'font.size': 14})
+
+# fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+
+# # Top plot: active delay
+# ax1.plot(step_times, delay_history, color='red', alpha=0.7, label='Active Delay (us)')
+# ax1.axhline(y=1, color='black', linestyle='--', label='Threshold (170us)')
+# ax1.set_ylabel('Delay (us)')
+# ax1.set_title('Active Delay Every 0.1s - Using Trained model')
+# ax1.legend()
+# ax1.grid(True, linestyle='--')
+
+# # Bottom plot: both link delays
+# ax2.plot(step_times, l1_delay_history, color='blue', alpha=0.7, label='Link 1 Delay (us)')
+# ax2.plot(step_times, l2_delay_history, color='green', alpha=0.7, label='Link 2 Delay (us)')
+# ax2.axhline(y=1, color='black', linestyle='--', label='Threshold (170us)')
+# ax2.set_xlabel('Time (s)')
+# ax2.set_ylabel('Delay (us)')
+# ax2.set_title('Per-Link Delay Comparison')
+# ax2.legend()
+# ax2.grid(True, linestyle='--')
+
+
+# # Bottom plot: selected link at each step
+# ax3.step(step_times, action_history, color='purple', linewidth=1.5, label='Selected Link')
+# ax3.set_yticks([0, 1])
+# ax3.set_yticklabels(['Link 1', 'Link 2'])
+# ax3.set_xlabel('Time (s)')
+# ax3.set_ylabel('Selected Link')
+# ax3.set_title('Agent Link Selection per Step')
+# ax3.legend()
+# ax3.grid(True, linestyle='--')
+
+# plt.tight_layout()
+# plt.savefig('inference_delay.pdf')
+# plt.show()
+
+
+
+
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import numpy as np
 import tensorflow as tf
 from tensorflow import keras
@@ -242,19 +358,17 @@ a_size = ac_space.n
 print("s_size =", s_size)
 print("a_size =", a_size)
 
-delay_history = []
-step_times = []
-l1_delay_history = []
-l2_delay_history = []
-action_history = []
-
-step_counter = 0
-
-total_episodes = 1
+total_episodes = 7      # Change this to run more episodes
 max_env_steps  = 5000
 
+# Per-episode accumulators
+all_episode_delays  = []   # list of lists: all delay values per episode
+episode_rewards     = []   # total reward per episode
+
 # --- Load trained model ---
-model = tf.keras.models.load_model("/home/suneel/Videos/ns-allinone-3.36.1/ns-3.36.1/contrib/opengym/examples/opengym/wifi_mlo_model.keras")
+model = tf.keras.models.load_model(
+    "/home/suneel/Videos/ns-allinone-3.36.1/ns-3.36.1/contrib/opengym/examples/opengym/wifi_mlo_model.keras"
+)
 print("Model loaded successfully!")
 
 # --- Inference loop ---
@@ -262,68 +376,71 @@ for e in range(total_episodes):
     state = env.reset()
     state = np.reshape(state, [1, s_size])
 
-    for time in range(max_env_steps):
+    ep_delays  = []
+    ep_reward  = 0.0
+
+    for t in range(max_env_steps):
         action = np.argmax(model.predict(state, verbose=0)[0])
 
         next_state, reward, done, info = env.step(action)
 
-        l1_delay = float(next_state[0])
-        l2_delay = float(next_state[1])
-        action_history.append(action)
-
-
         current_delay = float(info)
-        delay_history.append(current_delay)
-        l1_delay_history.append(l1_delay)
-        l2_delay_history.append(l2_delay)
-        step_times.append(step_counter * 0.1)
-        step_counter += 1
-
-        # print(f"t={step_counter*0.1:.1f}s | Action: {action} | Delay: {current_delay:.2f} us")
+        ep_delays.append(current_delay)
+        ep_reward += reward
 
         if done:
             break
 
         state = np.reshape(next_state, [1, s_size])
 
+    all_episode_delays.append(ep_delays)
+    episode_rewards.append(ep_reward)
+    print(f"Episode {e+1}/{total_episodes} | Steps: {len(ep_delays)} "
+          f"| Total Reward: {ep_reward:.2f} | Median Delay: {np.median(ep_delays):.2f} us")
+
 env.close()
 print("Inference complete.")
 
 # --- Plot ---
 mpl.rcdefaults()
-mpl.rcParams.update({'font.size': 14})
+mpl.rcParams.update({'font.size': 13})
 
-fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(14, 12), sharex=True)
+episode_labels = [f"Ep {i+1}" for i in range(total_episodes)]
 
-# Top plot: active delay
-ax1.plot(step_times, delay_history, color='red', alpha=0.7, label='Active Delay (us)')
-ax1.axhline(y=170, color='black', linestyle='--', label='Threshold (170us)')
-ax1.set_ylabel('Delay (us)')
-ax1.set_title('Active Delay Every 0.1s - Using Trained model')
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(max(10, total_episodes * 1.5), 10))
+
+# ── Subplot 1: Boxplot of delay per episode ──────────────────────────────────
+ax1.boxplot(
+    all_episode_delays,
+    labels=episode_labels,
+    patch_artist=True,
+    boxprops=dict(facecolor='lightcoral', color='darkred'),
+    medianprops=dict(color='black', linewidth=2),
+    whiskerprops=dict(color='darkred'),
+    capprops=dict(color='darkred'),
+    flierprops=dict(marker='o', markerfacecolor='red', markersize=3, alpha=0.4),
+)
+ax1.axhline(y=170, color='black', linestyle='--', linewidth=1.2, label='SLA Threshold (170 µs)')
+ax1.set_ylabel('Delay (µs)')
+ax1.set_title('Delay Distribution per Episode (Trained Model)')
 ax1.legend()
-ax1.grid(True, linestyle='--')
+ax1.grid(True, linestyle='--', alpha=0.6)
 
-# Bottom plot: both link delays
-ax2.plot(step_times, l1_delay_history, color='blue', alpha=0.7, label='Link 1 Delay (us)')
-ax2.plot(step_times, l2_delay_history, color='green', alpha=0.7, label='Link 2 Delay (us)')
-ax2.axhline(y=170, color='black', linestyle='--', label='Threshold (170us)')
-ax2.set_xlabel('Time (s)')
-ax2.set_ylabel('Delay (us)')
-ax2.set_title('Per-Link Delay Comparison')
-ax2.legend()
-ax2.grid(True, linestyle='--')
-
-
-# Bottom plot: selected link at each step
-ax3.step(step_times, action_history, color='purple', linewidth=1.5, label='Selected Link')
-ax3.set_yticks([0, 1])
-ax3.set_yticklabels(['Link 1', 'Link 2'])
-ax3.set_xlabel('Time (s)')
-ax3.set_ylabel('Selected Link')
-ax3.set_title('Agent Link Selection per Step')
-ax3.legend()
-ax3.grid(True, linestyle='--')
+# ── Subplot 2: Total reward per episode ──────────────────────────────────────
+bar_colors = ['steelblue' if r >= 0 else 'salmon' for r in episode_rewards]
+ax2.bar(episode_labels, episode_rewards, color=bar_colors, edgecolor='navy', linewidth=0.8)
+ax2.axhline(y=0, color='black', linewidth=0.8)
+ax2.set_ylabel('Total Reward')
+ax2.set_xlabel('Episode')
+ax2.set_title('Total Reward per Episode')
+ax2.grid(True, linestyle='--', alpha=0.6, axis='y')
 
 plt.tight_layout()
-plt.savefig('inference_delay.pdf')
+plt.savefig('inference_episode_summary.pdf')
 plt.show()
+
+# --- Save CSVs ---
+for i, delays in enumerate(all_episode_delays):
+    np.savetxt(f"episode_{i+1}_delays.csv", delays, delimiter=",", header="delay_us", comments='')
+np.savetxt("episode_rewards.csv", episode_rewards, delimiter=",", header="total_reward", comments='')
+print("Data saved successfully!")
