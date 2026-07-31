@@ -32,6 +32,25 @@ build_lib_example(
     ${libwifi}
 )
 
+
+build_lib_example(
+  NAME MLORLWork
+  SOURCE_FILES PolicyGradient_MLO/sim.cc
+  LIBRARIES_TO_LINK
+    ${libcore}
+    ${libopengym}
+    ${libwifi}
+    ${libmobility}
+    ${libinternet}
+    ${libapplications}
+    ${libnetwork}
+    ${libstats}
+    ${libspectrum}
+    ${libflow-monitor}
+    ${libpropagation}
+)
+
+
 build_lib_example(
   NAME opengym
   SOURCE_FILES opengym/sim.cc
